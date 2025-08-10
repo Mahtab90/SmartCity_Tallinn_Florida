@@ -1,0 +1,73 @@
+(Traffic Incident Dataset Harmonization: Florida & Tallinn)
+
+
+Overview
+This paper provides a complete ETL pipeline to harmonize two heterogeneous traffic datasets — Florida (TMC-based ITS) and Tallinn (DATEX II) — into a single, unified schema.
+The harmonized data enables direct cross-city comparison, transfer learning, and smart city analytics.
+
+Features:
+-Cross-standard harmonization: Converts different formats and metadata into a shared schema.
+-Travel time estimation: Calculates travel_time_minutes from observed speed and segment length.
+-Reference speed calculation: Back-calculates reference_speed for Tallinn from relative_speed.
+-Incident labeling: Performs spatial–temporal joins to set incident flag for segments near active restrictions.
+-Time features: Extracts weekday, time_sin, time_cos for cyclic modeling.
+-ML-ready output: Saves harmonized CSVs for modeling with XGBoost, Random Forest, LSTM, etc.
+
++--------------------+         +-------------------------+         +--------------------------+
+| Florida TMC Data   |         |                         |         |                          |
+| (CSV)              +-------->  Harmonization Pipeline  +-------->  ML-ready Datasets        |
++--------------------+         |     (Python ETL)        |         | (Harmonized CSVs)        |
+                                +-------------------------+         +--------------------------+
++------------------------------+
+| Tallinn DATEX II Data        |
+| (CSV + GeoJSON)              |
++------------------------------+
+
+
+Input Data
+1- Florida TMC Data – CSV file containing:
+. speed (km/h), reference_speed (km/h), incident_flag, tmc_segment_id
+
+2- Tallinn Detector Data – CSV/ArcGIS export containing:
+. average_speed, relative_speed, total_flow, detector_id
+
+3- Tallinn Restrictions Data – GeoJSON/ArcGIS export containing:
+. cause, effect, date_from, date_to, segment_length
+
+
+Output Schema
+| Column                 | Description                              |
+| ---------------------- | ---------------------------------------- |
+| `segment_id`           | Unique segment ID (TMC ID or composite)  |
+| `speed`                | Observed average speed (km/h)            |
+| `reference_speed`      | Nominal free-flow speed (km/h)           |
+| `travel_time_minutes`  | Estimated segment travel time            |
+| `incident`             | 0/1 flag for active restriction/incident |
+| `weekday`              | Day of week (0=Monday)                   |
+| `time_sin`, `time_cos` | Cyclic encoding of time-of-day           |
+| `source`               | Dataset origin (`florida` / `tallinn`)   |
+
+
+
+Usage
+1- Place raw data in data_in/:
+data_in/florida_tmc.csv
+data_in/tallinn_detectors.csv
+data_in/tallinn_restrictions.geojson
+
+2- Install dependencies:
+pip install pandas geopandas shapely pyproj requests pytz
+
+3- Run the pipeline:
+python traffic_harmonization_pipeline.py
+
+4- Find harmonized outputs in data_out/:
+data_out/florida_harmonized.csv
+data_out/tallinn_harmonized.csv
+
+
+
+Applications
+- Comparative smart city traffic analytics.
+- Incident prediction and transfer learning across cities.
+- Urban mobility planning and resilience studies.

@@ -1,0 +1,213 @@
+pip install geopandas cartopy shapely pyproj requests matplotlib
+"""
+make_maps_florida_tallinn.py
+Creates publication-quality maps for Florida & Tallinn comparison.
+Outputs vector PDFs and PNGs ready for Overleaf.
+
+Requires: geopandas, cartopy, shapely, pyproj, requests, matplotlib
+"""
+
+import os, io, zipfile, requests
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import geopandas as gpd
+from shapely.geometry import Point
+from pyproj import Geod
+
+# -----------------------------
+# CONFIG: input CSVs with points
+# -----------------------------
+TALLINN_CSV = "detectors_tallinn.csv"
+FLORIDA_CSV = "detectors_florida.csv"
+
+# Example CSV schema:
+# lon,lat,label,type
+# 24.728,59.437,Detector A,detector
+# 24.665,59.395,GTFS Stop 1,gtfs_stop
+
+# -----------------------------
+# DATA SOURCES (authoritative)
+# -----------------------------
+# Natural Earth Admin-0 (countries), Admin-1 (states/provinces)
+NE_BASE = "https://www.naturalearthdata.com/http//www.naturalearthdata.com/download/10m/cultural/"
+NE_ADMIN0 = "ne_10m_admin_0_countries.zip"
+NE_ADMIN1 = "ne_10m_admin_1_states_provinces.zip"
+
+# GADM v4.1 Estonia GeoPackage (municipal boundaries incl. Tallinn)
+GADM_EST = "https://geodata.ucdavis.edu/gadm/gadm4.1/gpkg/gadm41_EST.gpkg"
+
+OUT_DIR = "out_maps"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+def _download(url, out_path):
+    if os.path.exists(out_path):
+        return out_path
+    r = requests.get(url, timeout=60)
+    r.raise_for_status()
+    with open(out_path, "wb") as f:
+        f.write(r.content)
+    return out_path
+
+def _ensure_ne_layer(zip_name):
+    zpath = os.path.join(OUT_DIR, zip_name)
+    _download(NE_BASE + zip_name, zpath)
+    # Extract if needed
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(os.path.join(OUT_DIR, zip_name.replace(".zip","")))
+    # Find the shapefile path
+    folder = os.path.join(OUT_DIR, zip_name.replace(".zip",""))
+    shp = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".shp")]
+    if not shp:
+        raise FileNotFoundError("Shapefile not found in " + folder)
+    return shp[0]
+
+def _ensure_gadm_est():
+    gpath = os.path.join(OUT_DIR, "gadm41_EST.gpkg")
+    _download(GADM_EST, gpath)
+    return gpath
+
+def load_points(csv_path):
+    import csv
+    pts = []
+    if not os.path.exists(csv_path):
+        print(f"[WARN] CSV not found: {csv_path} (continuing without points)")
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            try:
+                lon = float(row["lon"]); lat = float(row["lat"])
+                lbl = row.get("label","")
+                typ = row.get("type","detector")
+                pts.append({"lon":lon, "lat":lat, "label":lbl, "type":typ, "geometry": Point(lon,lat)})
+            except Exception:
+                continue
+    return gpd.GeoDataFrame(pts, geometry="geometry", crs="EPSG:4326")
+
+# Scale bar for PlateCarree axes (km)
+def add_scalebar_pc(ax, length_km=20, location=(0.08, 0.08), linewidth=2):
+    # Determine center latitude of current extent
+    x0, x1, y0, y1 = ax.get_extent(ccrs.PlateCarree())
+    lat = (y0 + y1) / 2
+    lon_center = (x0 + x1) / 2
+    # convert km to degrees (approx) at this latitude using geodesic
+    geod = Geod(ellps="WGS84")
+    # find lon delta for given km along a parallel
+    lon2, lat2, _ = geod.fwd(lon_center, lat, 90, length_km*1000)  # eastward
+    deg_len = lon2 - lon_center
+    # place bar in axes coords
+    x_ax, y_ax = location
+    # transform axes to data
+    import matplotlib.transforms as transforms
+    trans = transforms.blended_transform_factory(ax.transAxes, ax.transAxes)
+    # build a line in data coordinates at bottom-left
+    # convert axes x to data lon range
+    lon_span = x1 - x0
+    lat_span = y1 - y0
+    x_data = x0 + x_ax * lon_span
+    y_data = y0 + y_ax * lat_span
+    ax.plot([x_data, x_data + deg_len], [y_data, y_data], transform=ccrs.PlateCarree(), linewidth=linewidth)
+    ax.text(x_data + deg_len/2, y_data + 0.1* (lat_span/20), f"{length_km} km",
+            ha="center", va="bottom", fontsize=8, transform=ccrs.PlateCarree())
+
+def savefig(fig, name):
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUT_DIR, f"{name}.pdf"), dpi=300, bbox_inches="tight")
+    fig.savefig(os.path.join(OUT_DIR, f"{name}.png"), dpi=300, bbox_inches="tight")
+    print(f"[OK] Saved {name}.pdf and {name}.png in {OUT_DIR}/")
+
+def main():
+    # Load boundaries
+    admin0_shp = _ensure_ne_layer(NE_ADMIN0)
+    admin1_shp = _ensure_ne_layer(NE_ADMIN1)
+    gadm_est = _ensure_gadm_est()
+
+    countries = gpd.read_file(admin0_shp)
+    states = gpd.read_file(admin1_shp)
+    est_levels = gpd.read_file(gadm_est, layer="ADM_ADM_2")  # municipalities
+
+    # Subsets
+    estonia = countries[countries["NAME"]=="Estonia"].to_crs("EPSG:4326")
+    usa = countries[countries["NAME"]=="United States of America"].to_crs("EPSG:4326")
+    florida = states[(states["admin"]=="United States of America") & (states["name"]=="Florida")].to_crs("EPSG:4326")
+    tallinn = est_levels[est_levels["ADM2_NAME"].str.lower()=="tallinn"].to_crs("EPSG:4326")
+
+    # Points
+    tallinn_pts = load_points(TALLINN_CSV)
+    florida_pts = load_points(FLORIDA_CSV)
+
+    # --- Figure 1: World map with markers (Robinson)
+    fig = plt.figure(figsize=(12,6))
+    ax = plt.subplot(1,1,1, projection=ccrs.Robinson())
+    ax.set_title("World map with study areas")
+    ax.add_feature(cfeature.LAND, zorder=0)
+    ax.add_feature(cfeature.OCEAN, zorder=0)
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.4)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.3)
+
+    # Centroids for labels
+    tallinn_cent = tallinn.geometry.unary_union.centroid
+    florida_cent = florida.geometry.unary_union.centroid
+
+    ax.plot(tallinn_cent.x, tallinn_cent.y, marker='o', transform=ccrs.PlateCarree())
+    ax.text(tallinn_cent.x+6, tallinn_cent.y+1, "Tallinn", transform=ccrs.PlateCarree(), fontsize=9)
+    ax.plot(florida_cent.x, florida_cent.y, marker='o', transform=ccrs.PlateCarree())
+    ax.text(florida_cent.x-18, florida_cent.y+2, "Florida", transform=ccrs.PlateCarree(), fontsize=9)
+
+    savefig(fig, "world_study_areas")
+
+    # --- Figure 2: Estonia zoom (PlateCarree)
+    fig2 = plt.figure(figsize=(6,7))
+    ax2 = plt.subplot(1,1,1, projection=ccrs.PlateCarree())
+    ax2.set_title("Estonia (Tallinn highlighted)")
+    ax2.add_feature(cfeature.LAND)
+    ax2.add_feature(cfeature.OCEAN)
+    ax2.add_feature(cfeature.COASTLINE, linewidth=0.4)
+    ax2.add_feature(cfeature.BORDERS, linewidth=0.3)
+
+    estonia.boundary.plot(ax=ax2, transform=ccrs.PlateCarree(), linewidth=0.8)
+    tallinn.plot(ax=ax2, transform=ccrs.PlateCarree(), facecolor="none", edgecolor="black", linewidth=1.2)
+    # Points: detectors (circle), GTFS (square), default colors (grayscale-safe via shapes)
+    for typ, mark in [("detector","o"),("gtfs_stop","s")]:
+        subset = tallinn_pts[tallinn_pts["type"]==typ]
+        if len(subset):
+            ax2.scatter(subset["lon"], subset["lat"], marker=mark, s=30, transform=ccrs.PlateCarree(), label=("Detector" if typ=="detector" else "GTFS stop"))
+    ax2.legend(loc="lower left", fontsize=8, frameon=False)
+    # Extent around Tallinn with padding
+    if not tallinn.empty:
+        minx, miny, maxx, maxy = tallinn.total_bounds
+        pad_x = (maxx-minx)*0.6 or 0.5
+        pad_y = (maxy-miny)*0.6 or 0.5
+        ax2.set_extent([minx - pad_x, maxx + pad_x, miny - pad_y, maxy + pad_y], crs=ccrs.PlateCarree())
+    add_scalebar_pc(ax2, length_km=10)
+    savefig(fig2, "estonia_tallinn_zoom")
+
+    # --- Figure 3: Florida zoom (PlateCarree)
+    fig3 = plt.figure(figsize=(7,7))
+    ax3 = plt.subplot(1,1,1, projection=ccrs.PlateCarree())
+    ax3.set_title("Florida (state boundary)")
+
+    ax3.add_feature(cfeature.LAND)
+    ax3.add_feature(cfeature.OCEAN)
+    ax3.add_feature(cfeature.COASTLINE, linewidth=0.4)
+    ax3.add_feature(cfeature.BORDERS, linewidth=0.3)
+    florida.boundary.plot(ax=ax3, transform=ccrs.PlateCarree(), linewidth=1.2)
+
+    for typ, mark in [("detector","o"),("gtfs_stop","s")]:
+        subset = florida_pts[florida_pts["type"]==typ]
+        if len(subset):
+            ax3.scatter(subset["lon"], subset["lat"], marker=mark, s=30, transform=ccrs.PlateCarree(), label=("Detector" if typ=="detector" else "GTFS stop"))
+    ax3.legend(loc="lower left", fontsize=8, frameon=False)
+
+    # Extent to Florida bounds + padding
+    if not florida.empty:
+        minx, miny, maxx, maxy = florida.total_bounds
+        pad_x = (maxx-minx)*0.2
+        pad_y = (maxy-miny)*0.2
+        ax3.set_extent([minx - pad_x, maxx + pad_x, miny - pad_y, maxy + pad_y], crs=ccrs.PlateCarree())
+    add_scalebar_pc(ax3, length_km=50)
+    savefig(fig3, "florida_zoom")
+
+if __name__ == "__main__":
+    main()
